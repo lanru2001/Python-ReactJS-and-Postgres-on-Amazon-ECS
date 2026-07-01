@@ -1,36 +1,26 @@
-# ─── Build stage ────────────────────────────────────────────────────────────
-FROM python:3.11-slim AS builder
+# --- Build stage ---
+FROM node:20-alpine AS build
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential libpq-dev && \
-    rm -rf /var/lib/apt/lists/*
+COPY package*.json ./
+RUN npm ci
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
-
-# ─── Runtime stage ───────────────────────────────────────────────────────────
-FROM python:3.11-slim
-
-WORKDIR /app
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq5 curl && \
-    rm -rf /var/lib/apt/lists/*
-
-# Copy installed packages from builder
-COPY --from=builder /install /usr/local
-
-# Copy application code
 COPY . .
+# REACT_APP_API_URL is baked in at build time - passed as a build-arg from CI
+ARG REACT_APP_API_URL
+ENV REACT_APP_API_URL=$REACT_APP_API_URL
+RUN npm run build
 
-RUN useradd -m -u 1001 appuser && chown -R appuser:appuser /app
-USER appuser
+# --- Serve stage ---
+FROM nginx:1.27-alpine
 
-EXPOSE 8000
+COPY --from=build /app/build /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8000/api/health || exit 1
+EXPOSE 80
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD wget -q --spider http://localhost:80/ || exit 1
+
+CMD ["nginx", "-g", "daemon off;"]
